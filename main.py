@@ -1,5 +1,5 @@
 """
-Crypto Capital Rotation Radar - Python Edition (نسخه چندعکسی)
+Crypto Capital Rotation Radar - Python Edition (نسخه چندعکسی + Percentile Scoring)
 هماهنگ با اندیکاتور Pine Script | ارسال به تلگرام در قالب تصاویر جداگانه
 """
 
@@ -7,6 +7,7 @@ import os
 import io
 import json
 import time
+import bisect
 import requests
 from datetime import datetime, timezone
 from PIL import Image, ImageDraw, ImageFont
@@ -29,7 +30,7 @@ W_MOMENTUM = 25.0
 W_RELATIVE = 25.0
 W_ACCELERATION = 20.0
 
-# آستانه‌های وضعیت
+# آستانه‌های وضعیت (بر اساس امتیاز نهایی ۰ تا ۱۰۰ که حالا Percentile-based هست)
 STRONG_INFLOW = 80.0
 INFLOW = 65.0
 OUTFLOW = 35.0
@@ -114,13 +115,6 @@ def fetch_usdt_history():
 # توابع ریاضی
 # ============================================================
 
-def normalize(value, min_v, max_v):
-    if value is None:
-        return None
-    v = max(min_v, min(max_v, value))
-    return (v - min_v) / (max_v - min_v) * 100.0
-
-
 def past_cap(current_cap, pct_change):
     if current_cap is None or pct_change is None:
         return None
@@ -135,6 +129,24 @@ def pct_change(now, past):
     if now is None or past is None or past == 0:
         return None
     return (now / past - 1.0) * 100.0
+
+
+def percentile_rank(sorted_values, value):
+    """
+    محاسبه رتبه درصدی (0 تا 100) یک مقدار نسبت به کل توزیع.
+    برخلاف normalize قدیمی (که به بازه ثابت کلیپ می‌شد)، این روش
+    هر کوین رو نسبت به بقیه کوین‌های همون لحظه می‌سنجه، پس در بازارهای
+    پرشتاب هم امتیازها اشباع (Saturate) نمی‌شن و تفکیک بهتری بین کوین‌ها ایجاد می‌شه.
+    """
+    if value is None or not sorted_values:
+        return 50.0
+    n = len(sorted_values)
+    if n <= 1:
+        return 50.0
+    left = bisect.bisect_left(sorted_values, value)
+    right = bisect.bisect_right(sorted_values, value)
+    rank = (left + right) / 2.0
+    return rank / n * 100.0
 
 
 # ============================================================
@@ -239,7 +251,7 @@ else:
 
 
 # ============================================================
-# مرحله دوم: محاسبه امتیاز هر کوین
+# مرحله دوم: محاسبه امتیاز هر کوین (Percentile-Based Scoring)
 # ============================================================
 
 universe = [
@@ -249,7 +261,8 @@ universe = [
     and c.get("market_cap") is not None
 ]
 
-results = []
+# ---- پاس اول: محاسبه مقادیر خام (بدون امتیازدهی) ----
+raw_metrics = []
 
 for c in universe:
     cap_now = c.get("market_cap")
@@ -259,6 +272,8 @@ for c in universe:
     if mom_7d is None or mom_24h is None or cap_now is None:
         continue
     if not total_now or not total_main_past or not total_short_past:
+        continue
+    if total3_momentum is None:
         continue
 
     cap_main_past = past_cap(cap_now, mom_7d)
@@ -271,16 +286,32 @@ for c in universe:
     dom_change = dominance - dominance_main_past
     short_dom_change = dominance - dominance_short_past
     momentum = mom_7d
-    relative_diff = (momentum - total3_momentum) if total3_momentum is not None else None
+    relative_diff = momentum - total3_momentum
+    acceleration_raw = short_dom_change - dom_change
 
-    # بازه‌های گسترده‌تر متناسب با نوسانات بازار کریپتو
-    dom_score = normalize(dom_change, -2, 2)
-    momentum_score = normalize(momentum, -50, 50)
-    relative_score = normalize(relative_diff, -40, 40)
-    acceleration_score = normalize(short_dom_change - dom_change, -3, 3)
+    raw_metrics.append({
+        "symbol": c["symbol"].upper(),
+        "dominance": dominance,
+        "dom_change": dom_change,
+        "momentum": momentum,
+        "relative_diff": relative_diff,
+        "acceleration_raw": acceleration_raw,
+    })
 
-    if None in (dom_score, momentum_score, relative_score, acceleration_score):
-        continue
+# ---- ساخت لیست‌های مرتب‌شده برای محاسبه رتبه درصدی (Percentile Rank) ----
+dom_change_sorted = sorted(r["dom_change"] for r in raw_metrics)
+momentum_sorted = sorted(r["momentum"] for r in raw_metrics)
+relative_diff_sorted = sorted(r["relative_diff"] for r in raw_metrics)
+acceleration_sorted = sorted(r["acceleration_raw"] for r in raw_metrics)
+
+# ---- پاس دوم: امتیازدهی نسبی بر اساس جایگاه هر کوین در کل توزیع ----
+results = []
+
+for rm in raw_metrics:
+    dom_score = percentile_rank(dom_change_sorted, rm["dom_change"])
+    momentum_score = percentile_rank(momentum_sorted, rm["momentum"])
+    relative_score = percentile_rank(relative_diff_sorted, rm["relative_diff"])
+    acceleration_score = percentile_rank(acceleration_sorted, rm["acceleration_raw"])
 
     weight_sum = max(W_DOM + W_MOMENTUM + W_RELATIVE + W_ACCELERATION, 0.0001)
     score = (
@@ -291,10 +322,10 @@ for c in universe:
     ) / weight_sum
 
     results.append({
-        "symbol": c["symbol"].upper(),
-        "dominance": dominance,
-        "dom_change": dom_change,
-        "momentum": momentum,
+        "symbol": rm["symbol"],
+        "dominance": rm["dominance"],
+        "dom_change": rm["dom_change"],
+        "momentum": rm["momentum"],
         "relative": relative_score,
         "acceleration": acceleration_score,
         "score": score,
@@ -366,7 +397,8 @@ WIDTH = 900
 ROW_H = 32
 TABLE_HEADER_H = 36
 FOOTER_H = 30
-COL_WIDTHS = [40, 90, 80, 90, 70, 70, 80, 140, 70, 170]
+# ستون‌ها: #, COIN, DOM, DOMΔ, MOM, REL, ACC, SCORE, POWER, RANK, STATUS
+COL_WIDTHS = [40, 120, 65, 65, 70, 60, 60, 70, 110, 60, 180]
 
 
 def draw_medal(draw, cx, cy, rank, radius=11):
@@ -408,7 +440,6 @@ def build_image(results_slice, part_number, total_parts):
 
     is_first = (part_number == 1)
 
-    # محاسبه ارتفاع با توجه به اینکه هدر کامل یا خلاصه باشه
     header_h = 150 if is_first else 50
     height = header_h + TABLE_HEADER_H + ROW_H * len(results_slice) + FOOTER_H
 
@@ -470,7 +501,7 @@ def build_image(results_slice, part_number, total_parts):
         y += 34
 
     # ---------- هدر جدول ----------
-    headers = ["#", "COIN", "DOM", "MOM", "REL", "ACC", "SCORE", "POWER", "RANK", "STATUS"]
+    headers = ["#", "COIN", "DOM", "DOMΔ", "MOM", "REL", "ACC", "SCORE", "POWER", "RANK", "STATUS"]
     draw.rectangle([0, y, WIDTH, y + TABLE_HEADER_H], fill=COL_HEADER)
     x = 0
     for h, w in zip(headers, COL_WIDTHS):
@@ -490,6 +521,7 @@ def build_image(results_slice, part_number, total_parts):
         draw.rectangle([0, y, WIDTH, y + ROW_H], fill=row_bg)
 
         x = 0
+        # # (رتبه با مدال دستی برای ۳ نفر اول)
         if r["rank"] <= 3:
             draw_medal(draw, x + COL_WIDTHS[0] // 2, y + ROW_H // 2, r["rank"])
         else:
@@ -497,52 +529,68 @@ def build_image(results_slice, part_number, total_parts):
                       fill=COL_WHITE, font=font_small, anchor="mm")
         x += COL_WIDTHS[0]
 
+        # COIN
         draw.text((x + 10, y + ROW_H // 2), r["symbol"],
                   fill=COL_WHITE, font=font_regular, anchor="lm")
         x += COL_WIDTHS[1]
 
+        # DOM
         draw.text((x + COL_WIDTHS[2] // 2, y + ROW_H // 2),
                   f"{r['dominance']:.2f}%", fill=(190, 200, 215),
                   font=font_small, anchor="mm")
         x += COL_WIDTHS[2]
 
-        mom_clr = COL_BULL if r["momentum"] >= 0 else COL_BEAR
+        # DOMΔ (تغییر سهم دامیننس - ستون جدید)
+        dom_delta_clr = COL_BULL if r["dom_change"] >= 0 else COL_BEAR
         draw.text((x + COL_WIDTHS[3] // 2, y + ROW_H // 2),
-                  f"{r['momentum']:+.2f}%", fill=mom_clr,
+                  f"{r['dom_change']:+.3f}%", fill=dom_delta_clr,
                   font=font_small, anchor="mm")
         x += COL_WIDTHS[3]
 
-        rel_clr = COL_BULL if r["relative"] >= 50 else COL_BEAR
+        # MOM
+        mom_clr = COL_BULL if r["momentum"] >= 0 else COL_BEAR
         draw.text((x + COL_WIDTHS[4] // 2, y + ROW_H // 2),
-                  f"{r['relative']:.1f}", fill=rel_clr,
+                  f"{r['momentum']:+.2f}%", fill=mom_clr,
                   font=font_small, anchor="mm")
         x += COL_WIDTHS[4]
 
-        acc_clr = COL_BULL if r["acceleration"] >= 50 else COL_BEAR
+        # REL
+        rel_clr = COL_BULL if r["relative"] >= 50 else COL_BEAR
         draw.text((x + COL_WIDTHS[5] // 2, y + ROW_H // 2),
-                  f"{r['acceleration']:.1f}", fill=acc_clr,
+                  f"{r['relative']:.1f}", fill=rel_clr,
                   font=font_small, anchor="mm")
         x += COL_WIDTHS[5]
 
+        # ACC
+        acc_clr = COL_BULL if r["acceleration"] >= 50 else COL_BEAR
         draw.text((x + COL_WIDTHS[6] // 2, y + ROW_H // 2),
-                  f"{r['score']:.1f}", fill=r["status_color"],
-                  font=font_bold, anchor="mm")
+                  f"{r['acceleration']:.1f}", fill=acc_clr,
+                  font=font_small, anchor="mm")
         x += COL_WIDTHS[6]
 
-        bars = max(0, min(10, round(r["score"] / 10)))
-        power_str = "\u2588" * bars + "\u2591" * (10 - bars)
-        draw.text((x + COL_WIDTHS[7] // 2, y + ROW_H // 2), power_str,
-                  fill=r["status_color"], font=font_small, anchor="mm")
+        # SCORE
+        draw.text((x + COL_WIDTHS[7] // 2, y + ROW_H // 2),
+                  f"{r['score']:.1f}", fill=r["status_color"],
+                  font=font_bold, anchor="mm")
         x += COL_WIDTHS[7]
 
-        rk_clr = COL_BULL if r["rank_change_dir"] > 0 \
-            else COL_BEAR if r["rank_change_dir"] < 0 else COL_NEUTRAL
-        draw.text((x + COL_WIDTHS[8] // 2, y + ROW_H // 2),
-                  r["rank_change_text"], fill=rk_clr,
-                  font=font_small, anchor="mm")
+        # POWER
+        bars = max(0, min(10, round(r["score"] / 10)))
+        power_str = "\u2588" * bars + "\u2591" * (10 - bars)
+        draw.text((x + COL_WIDTHS[8] // 2, y + ROW_H // 2), power_str,
+                  fill=r["status_color"], font=font_small, anchor="mm")
         x += COL_WIDTHS[8]
 
+        # RANK (تغییر رتبه نسبت به اجرای قبل)
+        rk_clr = COL_BULL if r["rank_change_dir"] > 0 \
+            else COL_BEAR if r["rank_change_dir"] < 0 else COL_NEUTRAL
         draw.text((x + COL_WIDTHS[9] // 2, y + ROW_H // 2),
+                  r["rank_change_text"], fill=rk_clr,
+                  font=font_small, anchor="mm")
+        x += COL_WIDTHS[9]
+
+        # STATUS
+        draw.text((x + COL_WIDTHS[10] // 2, y + ROW_H // 2),
                   r["status"], fill=r["status_color"],
                   font=font_small, anchor="mm")
 
@@ -552,7 +600,6 @@ def build_image(results_slice, part_number, total_parts):
     draw.rectangle([0, y, WIDTH, y + FOOTER_H], fill=COL_HEADER)
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
-    # عنوان فارسی بخش جاری
     persian_part_names = {
         1: "لیست ۲۰ تای اول",
         2: "لیست ۲۰ تای دوم",
