@@ -61,7 +61,7 @@ COL_NEUTRAL = (155, 165, 185)
 COL_WHITE = (232, 237, 245)
 COL_BORDER = (28, 43, 69)
 
-MEDALS = ["🥇", "🥈", "🥉"]
+MEDALS = ["🥇", "🥈", "🥉"]  # فقط برای caption تلگرام استفاده می‌شه
 
 # ============================================================
 # تابع‌های کمکی برای API
@@ -369,6 +369,40 @@ FOOTER_H = 30
 COL_WIDTHS = [40, 90, 80, 90, 70, 70, 80, 140, 70, 170]
 
 
+def draw_medal(draw, cx, cy, rank, radius=11):
+    """رسم دستی مدال به صورت دایره‌ی رنگی به‌جای ایموجی (که در فونت پشتیبانی نمی‌شه)"""
+    colors = {1: (255, 215, 0), 2: (200, 205, 215), 3: (205, 140, 80)}
+    color = colors.get(rank, COL_WHITE)
+    draw.ellipse([cx - radius, cy - radius, cx + radius, cy + radius],
+                 fill=color, outline=(20, 20, 20), width=1)
+    draw.text((cx, cy + 1), str(rank), fill=(15, 15, 15),
+              font=font_small, anchor="mm")
+
+
+def draw_top3_summary(draw, cy, top3_list):
+    """رسم خلاصه Top3 با مدال‌های دستی به‌جای ایموجی"""
+    medal_r = 10
+    gap_after_medal = 6
+    gap_between_items = 35
+
+    segments = []
+    for r in top3_list:
+        text = f"{r['symbol']} {r['score']:.1f}"
+        text_w = draw.textlength(text, font=font_regular)
+        seg_w = medal_r * 2 + gap_after_medal + text_w
+        segments.append((text, seg_w))
+
+    total_w = sum(s[1] for s in segments) + gap_between_items * (len(segments) - 1)
+    x = (WIDTH - total_w) // 2
+
+    for i, (text, seg_w) in enumerate(segments):
+        cx = x + medal_r
+        draw_medal(draw, cx, cy, i + 1, medal_r)
+        draw.text((x + medal_r * 2 + gap_after_medal, cy), text,
+                  fill=COL_GOLD, font=font_regular, anchor="lm")
+        x += seg_w + gap_between_items
+
+
 def build_image(results_slice, part_number, total_parts):
     """ساخت یک عکس برای یک بخش از لیست"""
 
@@ -432,11 +466,7 @@ def build_image(results_slice, part_number, total_parts):
 
         # Top 3
         draw.rectangle([0, y, WIDTH, y + 34], fill=(30, 24, 8))
-        top3_txt = "   \u2022   ".join(
-            f"{MEDALS[i]} {r['symbol']} {r['score']:.1f}" for i, r in enumerate(top3)
-        )
-        draw.text((WIDTH // 2, y + 17), top3_txt, fill=COL_GOLD,
-                  font=font_regular, anchor="mm")
+        draw_top3_summary(draw, y + 17, top3)
         y += 34
 
     # ---------- هدر جدول ----------
@@ -460,10 +490,11 @@ def build_image(results_slice, part_number, total_parts):
         draw.rectangle([0, y, WIDTH, y + ROW_H], fill=row_bg)
 
         x = 0
-        rank_txt = MEDALS[r["rank"] - 1] if r["rank"] <= 3 else str(r["rank"])
-        draw.text((x + COL_WIDTHS[0] // 2, y + ROW_H // 2), rank_txt,
-                  fill=COL_GOLD if r["rank"] <= 3 else COL_WHITE,
-                  font=font_small, anchor="mm")
+        if r["rank"] <= 3:
+            draw_medal(draw, x + COL_WIDTHS[0] // 2, y + ROW_H // 2, r["rank"])
+        else:
+            draw.text((x + COL_WIDTHS[0] // 2, y + ROW_H // 2), str(r["rank"]),
+                      fill=COL_WHITE, font=font_small, anchor="mm")
         x += COL_WIDTHS[0]
 
         draw.text((x + 10, y + ROW_H // 2), r["symbol"],
