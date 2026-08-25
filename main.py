@@ -269,10 +269,10 @@ for c in universe:
     momentum = mom_7d
 
     relative_diff = (momentum - total3_momentum) if total3_momentum is not None else None
-    relative_score = normalize(relative_diff, -10, 10)
+    relative_score = normalize(relative_diff, -40, 40)
 
     dom_score = normalize(dom_change, -1, 1)
-    momentum_score = normalize(momentum, -10, 10)
+    momentum_score = normalize(momentum, -50, 50)
     acceleration_score = normalize(short_dom_change - dom_change, -1, 1)
 
     if None in (dom_score, momentum_score, relative_score, acceleration_score):
