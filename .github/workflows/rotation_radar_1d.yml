@@ -1,0 +1,50 @@
+name: Crypto Capital Rotation Radar - 1D (Daily)
+
+on:
+  schedule:
+    - cron: "0 */2 * * *"   # هر ۲ ساعت یکبار
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: crypto-radar-1d
+  cancel-in-progress: false
+
+jobs:
+  run-radar-1d:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run rotation radar (1D mode)
+        env:
+          TIMEFRAME: "1D"
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
+        run: python main.py
+
+      - name: Sync with remote before commit
+        run: |
+          git fetch origin main
+          git pull origin main --no-rebase -X ours --no-edit || true
+
+      - name: Commit updated scores
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "Update previous_scores_1d.json [skip ci]"
+          file_pattern: "data/previous_scores_1d.json"
+          push_options: "--force-with-lease"
