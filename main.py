@@ -604,7 +604,7 @@ for part_num, chunk_data in enumerate(chunks, start=1):
 
     if part_num == 1:
         caption = (
-            f"<b>\ud83c\udfaf Top 3:</b> "
+            f"<b>🎯 Top 3:</b> "
             + " | ".join(f"{MEDALS[i]} {r['symbol']} ({r['score']:.1f})" 
                         for i, r in enumerate(top3))
             + f"\n<b>Regime:</b> {regime}"
