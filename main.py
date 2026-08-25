@@ -1,7 +1,7 @@
 """
 Crypto Capital Rotation Radar - Python Edition
 شبیه‌سازی اندیکاتور Pine Script با داده‌ی لایو از CoinGecko
-و ارسال خروجی تصویری به تلگرام
+ارسال خروجی به‌صورت چند عکس جداگانه (۲۰ کوین در هر عکس) به تلگرام
 """
 
 import os
@@ -20,10 +20,11 @@ TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 COINGECKO_API_KEY = os.environ.get("COINGECKO_API_KEY", "")  # اختیاری
 
-TOP_N_UNIVERSE = 150   # تعداد کوین‌هایی که از CoinGecko می‌گیریم
-TOP_N_DISPLAY = 30     # تعداد کوینی که در جدول نهایی نشون می‌دیم
+TOP_N_UNIVERSE = 250   # تعداد کوین‌هایی که از CoinGecko می‌گیریم
+TOP_N_DISPLAY = 100    # تعداد کوینی که در جدول‌های نهایی نشون می‌دیم
+CHUNK_SIZE = 20        # هر عکس شامل چند کوین باشه
 
-# وزن‌های امتیازدهی (دقیقاً مثل نسخه‌ی Pine)
+# وزن‌های امتیازدهی (مثل نسخه‌ی Pine)
 W_DOM = 30.0
 W_MOMENTUM = 25.0
 W_RELATIVE = 25.0
@@ -32,14 +33,22 @@ W_ACCELERATION = 20.0
 STRONG_INFLOW = 80.0
 INFLOW = 65.0
 OUTFLOW = 35.0
-STRONG_OUTFLOW = 20.0   # بهبود اضافه‌شده نسبت به نسخه‌ی اصلی Pine
+STRONG_OUTFLOW = 20.0
 
-# کوین‌هایی که از رتبه‌بندی آلت‌کوین حذف می‌شن (استیبل‌کوین‌ها و توکن‌های wrapped)
+# بازه‌های نرمال‌سازی (تنظیم‌شده برای نوسانات واقعی بازار کریپتو)
+MOMENTUM_RANGE = 50.0    # درصد تغییر 7 روزه بین -50 تا +50
+RELATIVE_RANGE = 40.0    # اختلاف نسبت به TOTAL3 بین -40 تا +40
+DOM_CHANGE_RANGE = 1.0   # تغییر دامیننس بین -1 تا +1 واحد درصد
+ACCEL_RANGE = 1.0        # اختلاف شتاب دامیننس بین -1 تا +1
+
+# کوین‌هایی که از رتبه‌بندی حذف می‌شن (استیبل‌کوین‌ها و توکن‌های wrapped)
 EXCLUDED_SYMBOLS = {
     "usdt", "usdc", "dai", "busd", "tusd", "usdd", "fdusd", "pyusd",
-    "usde", "frax", "gusd", "usdp", "eurs", "eurt",
+    "usde", "frax", "gusd", "usdp", "eurs", "eurt", "usds", "usdtb",
     "wbtc", "weth", "wsteth", "steth", "weeth", "cbbtc",
-    "reth", "meth", "wbeth", "beth"
+    "reth", "meth", "wbeth", "beth", "cbeth", "lseth", "oseth",
+    "susde", "susds", "eusde", "usd1", "usdf", "rlusd", "bfusd",
+    "xaut", "paxg", "jitosol", "msol", "bnsol",
 }
 
 DATA_FILE = "data/previous_scores.json"
@@ -72,32 +81,41 @@ def cg_headers():
 
 
 def fetch_market_data():
-    """گرفتن دیتای بازار برای TOP_N_UNIVERSE کوین در یک درخواست"""
-    url = "https://api.coingecko.com/api/v3/coins/markets"
-    params = {
-        "vs_currency": "usd",
-        "order": "market_cap_desc",
-        "per_page": TOP_N_UNIVERSE,
-        "page": 1,
-        "sparkline": "false",
-        "price_change_percentage": "1h,24h,7d,14d,30d"
-    }
-    for attempt in range(3):
-        try:
-            r = requests.get(url, params=params, headers=cg_headers(), timeout=20)
-            r.raise_for_status()
-            return r.json()
-        except Exception as e:
-            print(f"تلاش {attempt+1} ناموفق: {e}")
-            time.sleep(5)
-    raise RuntimeError("دریافت داده از CoinGecko ناموفق بود")
+    """گرفتن دیتای بازار برای TOP_N_UNIVERSE کوین (با صفحه‌بندی)"""
+    all_coins = []
+    per_page = 250
+    pages_needed = (TOP_N_UNIVERSE + per_page - 1) // per_page
+
+    for page in range(1, pages_needed + 1):
+        url = "https://api.coingecko.com/api/v3/coins/markets"
+        params = {
+            "vs_currency": "usd",
+            "order": "market_cap_desc",
+            "per_page": per_page,
+            "page": page,
+            "sparkline": "false",
+            "price_change_percentage": "1h,24h,7d,14d,30d"
+        }
+        success = False
+        for attempt in range(3):
+            try:
+                r = requests.get(url, params=params, headers=cg_headers(), timeout=20)
+                r.raise_for_status()
+                all_coins.extend(r.json())
+                success = True
+                break
+            except Exception as e:
+                print(f"صفحه {page}، تلاش {attempt+1} ناموفق: {e}")
+                time.sleep(5)
+        if not success:
+            raise RuntimeError("دریافت داده از CoinGecko ناموفق بود")
+        time.sleep(1.5)  # فاصله بین درخواست‌ها برای رعایت Rate Limit
+
+    return all_coins[:TOP_N_UNIVERSE]
 
 
 def fetch_usdt_history():
-    """
-    دریافت مارکت‌کپ واقعی USDT در گذشته (نه بر پایه‌ی قیمت، چون قیمت تتر تقریباً ثابته
-    و تغییرات دامیننس تتر بیشتر ناشی از چاپ/سوزوندن است نه قیمت)
-    """
+    """دریافت مارکت‌کپ واقعی USDT در گذشته"""
     url = "https://api.coingecko.com/api/v3/coins/tether/market_chart"
     params = {"vs_currency": "usd", "days": 8, "interval": "daily"}
     try:
@@ -106,8 +124,8 @@ def fetch_usdt_history():
         data = r.json()
         caps = data.get("market_caps", [])
         if len(caps) >= 2:
-            main_past = caps[0][1]        # ~۷-۸ روز قبل
-            short_past = caps[-2][1]      # ~۱ روز قبل
+            main_past = caps[0][1]
+            short_past = caps[-2][1]
             return main_past, short_past
     except Exception as e:
         print(f"خطا در دریافت تاریخچه‌ی USDT: {e}")
@@ -125,15 +143,21 @@ def normalize(value, min_v, max_v):
     return (v - min_v) / (max_v - min_v) * 100.0
 
 
-def past_cap(current_cap, pct_change):
-    """تخمین مارکت‌کپ گذشته بر اساس درصد تغییر قیمت (فرض: عرضه‌ی گردشی تقریباً ثابت)"""
-    if current_cap is None or pct_change is None:
+def past_cap(current_cap, pct_change_val):
+    """تخمین مارکت‌کپ گذشته بر اساس درصد تغییر قیمت"""
+    if current_cap is None or pct_change_val is None:
         return None
-    return current_cap / (1 + pct_change / 100.0)
+    return current_cap / (1 + pct_change_val / 100.0)
 
 
 def safe(v, default=0.0):
     return default if v is None else v
+
+
+def pct_change(now, past):
+    if now is None or past is None or past == 0:
+        return None
+    return (now / past - 1.0) * 100.0
 
 
 # ============================================================
@@ -174,12 +198,8 @@ top10_sum_main_past = sum(
     for c in raw_coins[:10]
 )
 
-def pct_change(now, past):
-    if now is None or past is None or past == 0:
-        return None
-    return (now / past - 1.0) * 100.0
-
 total_momentum = pct_change(total_now, total_main_past)
+
 total2_now = total_now - btc_cap_now
 total2_main_past = total_main_past - btc_cap_main_past
 total2_momentum = pct_change(total2_now, total2_main_past)
@@ -210,7 +230,7 @@ risk_off = (usdt_dom_change is not None and total_momentum is not None
             and usdt_dom_change > 0.20 and total_momentum < 0)
 
 broad_alt_rotation = (not risk_off and None not in (total2_momentum, total3_momentum, total_momentum)
-                       and total2_momentum > total_momentum and total3_momentum > total2_momentum)
+                      and total2_momentum > total_momentum and total3_momentum > total2_momentum)
 
 alt_rotation = (not risk_off and None not in (btc_dom_change, total3_momentum, total_momentum)
                 and btc_dom_change < 0 and total3_momentum > total_momentum)
@@ -269,11 +289,12 @@ for c in universe:
     momentum = mom_7d
 
     relative_diff = (momentum - total3_momentum) if total3_momentum is not None else None
-    relative_score = normalize(relative_diff, -40, 40)
 
-    dom_score = normalize(dom_change, -1, 1)
-    momentum_score = normalize(momentum, -50, 50)
-    acceleration_score = normalize(short_dom_change - dom_change, -1, 1)
+    # نرمال‌سازی با بازه‌های تنظیم‌شده برای کریپتو
+    relative_score = normalize(relative_diff, -RELATIVE_RANGE, RELATIVE_RANGE)
+    dom_score = normalize(dom_change, -DOM_CHANGE_RANGE, DOM_CHANGE_RANGE)
+    momentum_score = normalize(momentum, -MOMENTUM_RANGE, MOMENTUM_RANGE)
+    acceleration_score = normalize(short_dom_change - dom_change, -ACCEL_RANGE, ACCEL_RANGE)
 
     if None in (dom_score, momentum_score, relative_score, acceleration_score):
         continue
@@ -355,152 +376,254 @@ font_bold = ImageFont.truetype(FONT_DIR + "DejaVuSans-Bold.ttf", 16)
 font_regular = ImageFont.truetype(FONT_DIR + "DejaVuSans.ttf", 14)
 font_small = ImageFont.truetype(FONT_DIR + "DejaVuSans.ttf", 11)
 font_title = ImageFont.truetype(FONT_DIR + "DejaVuSans-Bold.ttf", 22)
+font_part = ImageFont.truetype(FONT_DIR + "DejaVuSans-Bold.ttf", 15)
 
 WIDTH = 900
 ROW_H = 32
-HEADER_H = 200
 TABLE_HEADER_H = 36
 FOOTER_H = 30
-HEIGHT = HEADER_H + TABLE_HEADER_H + ROW_H * len(results) + FOOTER_H
+PART_BANNER_H = 30
 
-img = Image.new("RGB", (WIDTH, HEIGHT), COL_BG_MAIN)
-draw = ImageDraw.Draw(img)
+medals = ["1st", "2nd", "3rd"]  # برای سازگاری فونت؛ در کپشن تلگرام از ایموجی استفاده می‌شه
+medal_emojis = ["🥇", "🥈", "🥉"]
 
-y = 0
 
-# Title
-draw.rectangle([0, y, WIDTH, y + 50], fill=COL_HEADER)
-draw.text((WIDTH // 2, y + 25), "◈  CRYPTO CAPITAL ROTATION RADAR  ◈",
-          fill=COL_GOLD, font=font_title, anchor="mm")
-y += 50
+def build_table_image(results_slice, part_number, total_parts):
+    """ساخت یک عکس برای یک بخش (chunk) از نتایج"""
 
-# Regime bar
-regime_bg = tuple(min(255, c + 15) for c in COL_BG_MAIN)
-draw.rectangle([0, y, WIDTH, y + 34], fill=regime_bg)
-draw.text((WIDTH // 2, y + 17), f"◉  {regime}   |   {regime_desc}",
-          fill=regime_color, font=font_regular, anchor="mm")
-y += 34
+    is_first = (part_number == 1)
 
-# Macro row 1
-draw.rectangle([0, y, WIDTH, y + 32], fill=COL_PANEL)
-macro_items = [
-    ("BTC.D", f"{btc_dom_now:.2f}%" if btc_dom_now else "—", COL_WHITE),
-    ("Δ", f"{btc_dom_change:+.2f}%" if btc_dom_change is not None else "—",
-     COL_GOLD if (btc_dom_change or 0) >= 0 else COL_BULL),
-    ("USDT.D", f"{usdt_dom_now:.2f}%" if usdt_dom_now else "—", COL_WHITE),
-    ("Δ", f"{usdt_dom_change:+.2f}%" if usdt_dom_change is not None else "—",
-     COL_BEAR if (usdt_dom_change or 0) > 0 else COL_BULL),
-    ("TOTAL", f"{total_momentum:+.2f}%" if total_momentum is not None else "—",
-     COL_BULL if (total_momentum or 0) >= 0 else COL_BEAR),
-]
-col_w = WIDTH // len(macro_items)
-for i, (label, value, color) in enumerate(macro_items):
-    cx = i * col_w + col_w // 2
-    draw.text((cx, y + 10), label, fill=COL_GOLD, font=font_small, anchor="mm")
-    draw.text((cx, y + 24), value, fill=color, font=font_small, anchor="mm")
-y += 32
+    # ارتفاع بخش هدر
+    header_h = 50 + PART_BANNER_H  # عنوان + بنر شماره بخش
+    if is_first:
+        header_h += 34 + 32 + 32 + 34  # regime + macro1 + macro2 + top3
 
-# Macro row 2
-draw.rectangle([0, y, WIDTH, y + 32], fill=COL_PANEL_ALT)
-macro_items2 = [
-    ("TOTAL2", total2_momentum), ("TOTAL3", total3_momentum), ("OTHERS", others_momentum),
-]
-col_w2 = WIDTH // len(macro_items2)
-for i, (label, value) in enumerate(macro_items2):
-    cx = i * col_w2 + col_w2 // 2
-    color = COL_BULL if (value or 0) >= 0 else COL_BEAR
-    draw.text((cx, y + 10), label, fill=COL_WHITE, font=font_small, anchor="mm")
-    draw.text((cx, y + 24), f"{value:+.2f}%" if value is not None else "—", fill=color, font=font_small, anchor="mm")
-y += 32
+    height = header_h + TABLE_HEADER_H + ROW_H * len(results_slice) + FOOTER_H
 
-# Top 3
-draw.rectangle([0, y, WIDTH, y + 34], fill=(30, 24, 8))
-medals = ["🥇", "🥈", "🥉"]
-top3_text = "   •   ".join(
-    f"{medals[i]} {r['symbol']} {r['score']:.1f}" for i, r in enumerate(top3)
-)
-draw.text((WIDTH // 2, y + 17), top3_text, fill=COL_GOLD, font=font_regular, anchor="mm")
-y += 34
+    img = Image.new("RGB", (WIDTH, height), COL_BG_MAIN)
+    draw = ImageDraw.Draw(img)
 
-# Table headers
-headers = ["#", "COIN", "DOM", "MOM", "REL", "ACC", "SCORE", "POWER", "RANK", "STATUS"]
-col_widths = [40, 90, 80, 90, 70, 70, 80, 140, 70, 170]
-draw.rectangle([0, y, WIDTH, y + TABLE_HEADER_H], fill=COL_HEADER)
-x = 0
-for h, w in zip(headers, col_widths):
-    draw.text((x + w // 2, y + TABLE_HEADER_H // 2), h, fill=COL_GOLD, font=font_small, anchor="mm")
-    x += w
-y += TABLE_HEADER_H
+    y = 0
 
-# Table rows
-for idx, r in enumerate(results):
-    row_bg = COL_PANEL if idx % 2 == 0 else COL_PANEL_ALT
-    if idx < 3:
-        row_bg = (40, 32, 12)
-    draw.rectangle([0, y, WIDTH, y + ROW_H], fill=row_bg)
+    # ---------- Title ----------
+    draw.rectangle([0, y, WIDTH, y + 50], fill=COL_HEADER)
+    draw.text((WIDTH // 2, y + 25), "CRYPTO CAPITAL ROTATION RADAR",
+              fill=COL_GOLD, font=font_title, anchor="mm")
+    y += 50
 
+    # ---------- Part Banner (شماره بخش) ----------
+    start_rank = results_slice[0]["rank"]
+    end_rank = results_slice[-1]["rank"]
+    part_text = f"{part_number}/{total_parts}  -  Ranks {start_rank} to {end_rank}"
+
+    draw.rectangle([0, y, WIDTH, y + PART_BANNER_H], fill=(25, 20, 8))
+    draw.text((WIDTH // 2, y + PART_BANNER_H // 2), part_text,
+              fill=COL_GOLD, font=font_part, anchor="mm")
+    y += PART_BANNER_H
+
+    # ---------- بخش‌های اضافی فقط در عکس اول ----------
+    if is_first:
+
+        # Regime bar
+        regime_bg = tuple(min(255, c + 15) for c in COL_BG_MAIN)
+        draw.rectangle([0, y, WIDTH, y + 34], fill=regime_bg)
+        draw.text((WIDTH // 2, y + 17), f"{regime}   |   {regime_desc}",
+                  fill=regime_color, font=font_regular, anchor="mm")
+        y += 34
+
+        # Macro row 1
+        draw.rectangle([0, y, WIDTH, y + 32], fill=COL_PANEL)
+        macro_items = [
+            ("BTC.D", f"{btc_dom_now:.2f}%" if btc_dom_now else "-", COL_WHITE),
+            ("Delta", f"{btc_dom_change:+.2f}%" if btc_dom_change is not None else "-",
+             COL_GOLD if (btc_dom_change or 0) >= 0 else COL_BULL),
+            ("USDT.D", f"{usdt_dom_now:.2f}%" if usdt_dom_now else "-", COL_WHITE),
+            ("Delta", f"{usdt_dom_change:+.2f}%" if usdt_dom_change is not None else "-",
+             COL_BEAR if (usdt_dom_change or 0) > 0 else COL_BULL),
+            ("TOTAL", f"{total_momentum:+.2f}%" if total_momentum is not None else "-",
+             COL_BULL if (total_momentum or 0) >= 0 else COL_BEAR),
+        ]
+        col_w = WIDTH // len(macro_items)
+        for i, (label, value, color) in enumerate(macro_items):
+            cx = i * col_w + col_w // 2
+            draw.text((cx, y + 10), label, fill=COL_GOLD, font=font_small, anchor="mm")
+            draw.text((cx, y + 24), value, fill=color, font=font_small, anchor="mm")
+        y += 32
+
+        # Macro row 2
+        draw.rectangle([0, y, WIDTH, y + 32], fill=COL_PANEL_ALT)
+        macro_items2 = [("TOTAL2", total2_momentum), ("TOTAL3", total3_momentum), ("OTHERS", others_momentum)]
+        col_w2 = WIDTH // len(macro_items2)
+        for i, (label, value) in enumerate(macro_items2):
+            cx = i * col_w2 + col_w2 // 2
+            color = COL_BULL if (value or 0) >= 0 else COL_BEAR
+            draw.text((cx, y + 10), label, fill=COL_WHITE, font=font_small, anchor="mm")
+            draw.text((cx, y + 24), f"{value:+.2f}%" if value is not None else "-", fill=color, font=font_small, anchor="mm")
+        y += 32
+
+        # Top 3
+        draw.rectangle([0, y, WIDTH, y + 34], fill=(30, 24, 8))
+        top3_text = "    -    ".join(
+            f"[{medals[i]}] {r['symbol']} {r['score']:.1f}" for i, r in enumerate(top3)
+        )
+        draw.text((WIDTH // 2, y + 17), top3_text, fill=COL_GOLD, font=font_regular, anchor="mm")
+        y += 34
+
+    # ---------- Table headers ----------
+    headers = ["#", "COIN", "DOM", "MOM", "REL", "ACC", "SCORE", "POWER", "RANK", "STATUS"]
+    col_widths = [40, 90, 80, 90, 70, 70, 80, 140, 70, 170]
+    draw.rectangle([0, y, WIDTH, y + TABLE_HEADER_H], fill=COL_HEADER)
     x = 0
-    rank_text = f"{medals[idx]}" if idx < 3 else str(r["rank"])
-    draw.text((x + col_widths[0] // 2, y + ROW_H // 2), rank_text, fill=COL_GOLD if idx < 3 else COL_WHITE, font=font_small, anchor="mm")
-    x += col_widths[0]
+    for h, w in zip(headers, col_widths):
+        draw.text((x + w // 2, y + TABLE_HEADER_H // 2), h, fill=COL_GOLD, font=font_small, anchor="mm")
+        x += w
+    y += TABLE_HEADER_H
 
-    draw.text((x + 10, y + ROW_H // 2), r["symbol"], fill=COL_WHITE, font=font_regular, anchor="lm")
-    x += col_widths[1]
+    # ---------- Table rows ----------
+    for idx, r in enumerate(results_slice):
+        row_bg = COL_PANEL if idx % 2 == 0 else COL_PANEL_ALT
+        if r["rank"] <= 3:
+            row_bg = (40, 32, 12)
+        draw.rectangle([0, y, WIDTH, y + ROW_H], fill=row_bg)
 
-    draw.text((x + col_widths[2] // 2, y + ROW_H // 2), f"{r['dominance']:.2f}%", fill=(190, 200, 215), font=font_small, anchor="mm")
-    x += col_widths[2]
+        x = 0
 
-    mom_color = COL_BULL if r["momentum"] >= 0 else COL_BEAR
-    draw.text((x + col_widths[3] // 2, y + ROW_H // 2), f"{r['momentum']:+.2f}%", fill=mom_color, font=font_small, anchor="mm")
-    x += col_widths[3]
+        # رتبه
+        draw.text((x + col_widths[0] // 2, y + ROW_H // 2), str(r["rank"]),
+                  fill=COL_GOLD if r["rank"] <= 3 else COL_WHITE, font=font_small, anchor="mm")
+        x += col_widths[0]
 
-    rel_color = COL_BULL if r["relative"] >= 50 else COL_BEAR
-    draw.text((x + col_widths[4] // 2, y + ROW_H // 2), f"{r['relative']:.1f}", fill=rel_color, font=font_small, anchor="mm")
-    x += col_widths[4]
+        # نام کوین
+        draw.text((x + 10, y + ROW_H // 2), r["symbol"], fill=COL_WHITE, font=font_regular, anchor="lm")
+        x += col_widths[1]
 
-    acc_color = COL_BULL if r["acceleration"] >= 50 else COL_BEAR
-    draw.text((x + col_widths[5] // 2, y + ROW_H // 2), f"{r['acceleration']:.1f}", fill=acc_color, font=font_small, anchor="mm")
-    x += col_widths[5]
+        # DOM
+        draw.text((x + col_widths[2] // 2, y + ROW_H // 2), f"{r['dominance']:.2f}%",
+                  fill=(190, 200, 215), font=font_small, anchor="mm")
+        x += col_widths[2]
 
-    draw.text((x + col_widths[6] // 2, y + ROW_H // 2), f"{r['score']:.1f}", fill=r["status_color"], font=font_bold, anchor="mm")
-    x += col_widths[6]
+        # MOM
+        mom_color = COL_BULL if r["momentum"] >= 0 else COL_BEAR
+        draw.text((x + col_widths[3] // 2, y + ROW_H // 2), f"{r['momentum']:+.2f}%",
+                  fill=mom_color, font=font_small, anchor="mm")
+        x += col_widths[3]
 
-    bars = max(0, min(10, round(r["score"] / 10)))
-    power_str = "█" * bars + "░" * (10 - bars)
-    draw.text((x + col_widths[7] // 2, y + ROW_H // 2), power_str, fill=r["status_color"], font=font_small, anchor="mm")
-    x += col_widths[7]
+        # REL
+        rel_color = COL_BULL if r["relative"] >= 50 else COL_BEAR
+        draw.text((x + col_widths[4] // 2, y + ROW_H // 2), f"{r['relative']:.1f}",
+                  fill=rel_color, font=font_small, anchor="mm")
+        x += col_widths[4]
 
-    rank_color = COL_BULL if r["rank_change_dir"] > 0 else COL_BEAR if r["rank_change_dir"] < 0 else COL_NEUTRAL
-    draw.text((x + col_widths[8] // 2, y + ROW_H // 2), r["rank_change_text"], fill=rank_color, font=font_small, anchor="mm")
-    x += col_widths[8]
+        # ACC
+        acc_color = COL_BULL if r["acceleration"] >= 50 else COL_BEAR
+        draw.text((x + col_widths[5] // 2, y + ROW_H // 2), f"{r['acceleration']:.1f}",
+                  fill=acc_color, font=font_small, anchor="mm")
+        x += col_widths[5]
 
-    draw.text((x + col_widths[9] // 2, y + ROW_H // 2), r["status"], fill=r["status_color"], font=font_small, anchor="mm")
+        # SCORE
+        draw.text((x + col_widths[6] // 2, y + ROW_H // 2), f"{r['score']:.1f}",
+                  fill=r["status_color"], font=font_bold, anchor="mm")
+        x += col_widths[6]
 
-    y += ROW_H
+        # POWER
+        bars = max(0, min(10, round(r["score"] / 10)))
+        power_str = "#" * bars + "-" * (10 - bars)
+        draw.text((x + col_widths[7] // 2, y + ROW_H // 2), power_str,
+                  fill=r["status_color"], font=font_small, anchor="mm")
+        x += col_widths[7]
 
-# Footer
-draw.rectangle([0, y, WIDTH, y + FOOTER_H], fill=COL_HEADER)
-now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-draw.text((WIDTH // 2, y + FOOTER_H // 2), f"Updated: {now_str}", fill=(150, 165, 185), font=font_small, anchor="mm")
+        # RANK CHANGE
+        rank_color = COL_BULL if r["rank_change_dir"] > 0 else COL_BEAR if r["rank_change_dir"] < 0 else COL_NEUTRAL
+        draw.text((x + col_widths[8] // 2, y + ROW_H // 2), r["rank_change_text"],
+                  fill=rank_color, font=font_small, anchor="mm")
+        x += col_widths[8]
+
+        # STATUS
+        draw.text((x + col_widths[9] // 2, y + ROW_H // 2), r["status"],
+                  fill=r["status_color"], font=font_small, anchor="mm")
+
+        y += ROW_H
+
+    # ---------- Footer ----------
+    draw.rectangle([0, y, WIDTH, y + FOOTER_H], fill=COL_HEADER)
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    footer_text = f"Part {part_number}/{total_parts}  |  Updated: {now_str}"
+    draw.text((WIDTH // 2, y + FOOTER_H // 2), footer_text,
+              fill=(150, 165, 185), font=font_small, anchor="mm")
+
+    buffer = io.BytesIO()
+    img.save(buffer, format="PNG")
+    buffer.seek(0)
+    return buffer
+
 
 # ============================================================
-# SEND TO TELEGRAM
+# SEND CHUNKS TO TELEGRAM
 # ============================================================
 
-buffer = io.BytesIO()
-img.save(buffer, format="PNG")
-buffer.seek(0)
+def chunk_list(lst, size):
+    for i in range(0, len(lst), size):
+        yield lst[i:i + size]
 
-caption = (
-    f"<b>🎯 Top 3:</b> "
-    + " | ".join(f"{medals[i]} {r['symbol']} ({r['score']:.1f})" for i, r in enumerate(top3))
-    + f"\n<b>Regime:</b> {regime}"
-)
 
-resp = requests.post(
-    f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto",
-    data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption, "parse_mode": "HTML"},
-    files={"photo": ("rotation_radar.png", buffer, "image/png")}
-)
+chunks = list(chunk_list(results, CHUNK_SIZE))
+total_parts = len(chunks)
 
-print("Telegram response:", resp.status_code, resp.text[:200])
+print(f"تعداد کل کوین‌ها: {len(results)} | تعداد عکس‌ها: {total_parts}")
+
+for part_number, chunk in enumerate(chunks, start=1):
+
+    image_buffer = build_table_image(chunk, part_number, total_parts)
+
+    start_rank = chunk[0]["rank"]
+    end_rank = chunk[-1]["rank"]
+
+    if part_number == 1:
+        caption = (
+            f"<b>{part_number}/{total_parts} - لیست {CHUNK_SIZE} تای اول</b> (رتبه {start_rank} تا {end_rank})\n"
+            + "<b>🎯 Top 3:</b> "
+            + " | ".join(f"{medal_emojis[i]} {r['symbol']} ({r['score']:.1f})" for i, r in enumerate(top3))
+            + f"\n<b>Regime:</b> {regime}"
+        )
+    else:
+        ordinal_names = {2: "دوم", 3: "سوم", 4: "چهارم", 5: "پنجم",
+                         6: "ششم", 7: "هفتم", 8: "هشتم", 9: "نهم", 10: "دهم"}
+        ordinal = ordinal_names.get(part_number, str(part_number))
+        caption = (
+            f"<b>{part_number}/{total_parts} - لیست {CHUNK_SIZE} تای {ordinal}</b>"
+            f" (رتبه {start_rank} تا {end_rank})"
+        )
+
+    sent = False
+    for attempt in range(3):
+        try:
+            resp = requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto",
+                data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption, "parse_mode": "HTML"},
+                files={"photo": (f"rotation_radar_part{part_number}.png", image_buffer, "image/png")},
+                timeout=30
+            )
+            print(f"Part {part_number}/{total_parts} sent:", resp.status_code, resp.text[:150])
+            if resp.status_code == 200:
+                sent = True
+                break
+            elif resp.status_code == 429:
+                # Rate limit تلگرام — صبر بیشتر
+                retry_after = resp.json().get("parameters", {}).get("retry_after", 5)
+                print(f"Rate limited. Waiting {retry_after}s ...")
+                time.sleep(retry_after + 1)
+                image_buffer.seek(0)
+            else:
+                time.sleep(3)
+                image_buffer.seek(0)
+        except Exception as e:
+            print(f"خطا در ارسال بخش {part_number}: {e}")
+            time.sleep(3)
+            image_buffer.seek(0)
+
+    if not sent:
+        print(f"هشدار: بخش {part_number} ارسال نشد!")
+
+    time.sleep(2)  # فاصله بین ارسال‌ها برای جلوگیری از Rate Limit
+
+print("تمام شد!")
