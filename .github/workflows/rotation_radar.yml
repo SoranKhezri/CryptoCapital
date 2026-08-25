@@ -2,7 +2,7 @@ name: Crypto Capital Rotation Radar
 
 on:
   schedule:
-    - cron: "0 */4 * * *"   # هر ۴ ساعت یکبار (بر اساس زمان UTC)
+    - cron: "0 * * * *"   # هر ۱ ساعت یکبار (بر اساس زمان UTC)
   workflow_dispatch: {}       # امکان اجرای دستی از تب Actions در گیت‌هاب
 
 permissions:
