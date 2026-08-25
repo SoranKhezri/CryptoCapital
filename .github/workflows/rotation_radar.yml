@@ -1,0 +1,37 @@
+name: Crypto Capital Rotation Radar
+
+on:
+  schedule:
+    - cron: "0 */4 * * *"   # هر ۴ ساعت یکبار (بر اساس زمان UTC)
+  workflow_dispatch: {}       # امکان اجرای دستی از تب Actions در گیت‌هاب
+
+permissions:
+  contents: write
+
+jobs:
+  run-radar:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run rotation radar script
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
+        run: python main.py
+
+      - name: Commit updated scores
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "Update previous_scores.json [skip ci]"
+          file_pattern: "data/previous_scores.json"
