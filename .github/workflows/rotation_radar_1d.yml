@@ -2,7 +2,7 @@ name: Crypto Capital Rotation Radar - 1D (Daily)
 
 on:
   schedule:
-    - cron: "0 */2 * * *"   # هر ۲ ساعت یکبار
+    - cron: "17 */2 * * *"   # اجرا در دقیقه ۱۷ هر ۲ ساعت یکبار
   workflow_dispatch: {}
 
 permissions:
